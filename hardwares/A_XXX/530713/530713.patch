@@ -1,0 +1,45 @@
+From 46c5e7018ed63ce6aeceea84711fb5077f43cbbb Mon Sep 17 00:00:00 2001
+From: caozhou <caozhou@baai.ac.cn>
+Date: Wed, 7 Aug 2024 08:11:31 +0800
+Subject: [PATCH 1/2] add run.py patch test
+
+---
+ run.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/run.py b/run.py
+index c80c086a..50ba5833 100644
+--- a/run.py
++++ b/run.py
+@@ -5,6 +5,7 @@ from flagscale.launcher.runner import SSHRunner
+ from flagscale.launcher.runner import CloudRunner
+ 
+ 
++# Test patch
+ @hydra.main(version_base=None, config_name="config")
+ def main(config: DictConfig) -> None:
+     if config.action == "auto_tune":
+-- 
+2.34.1
+
+
+From 2cc0b356b716c4d66eb03594894dc7c2854a1f21 Mon Sep 17 00:00:00 2001
+From: caozhou <caozhou@baai.ac.cn>
+Date: Wed, 7 Aug 2024 08:12:41 +0800
+Subject: [PATCH 2/2] add README.md patch test
+
+---
+ README.md | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/README.md b/README.md
+index 11428ac9..7aadfad4 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,4 @@
++# Test patch.
+ ## Introduction
+ 
+ [FlagScale](https://github.com/FlagOpen/FlagScale.git) is a comprehensive toolkit for large-scale models, developed with the support of the Beijing Academy of Artificial Intelligence (BAAI). It builds upon open-source projects such as [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) and [vllm](https://github.com/vllm-project/vllm). 
+-- 
+2.34.1
