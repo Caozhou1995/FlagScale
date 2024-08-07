@@ -1,0 +1,24 @@
+From b69be43869d9a8b7747c7f9bb19277a830bc9539 Mon Sep 17 00:00:00 2001
+From: caozhou <caozhou@baai.ac.cn>
+Date: Wed, 7 Aug 2024 11:27:01 +0800
+Subject: [PATCH] A_XXX_0
+
+---
+ run.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/run.py b/run.py
+index c80c086a..a65d0e8a 100644
+--- a/run.py
++++ b/run.py
+@@ -4,7 +4,7 @@ from flagscale.logger import logger
+ from flagscale.launcher.runner import SSHRunner
+ from flagscale.launcher.runner import CloudRunner
+ 
+-
++# A_XXX 0
+ @hydra.main(version_base=None, config_name="config")
+ def main(config: DictConfig) -> None:
+     if config.action == "auto_tune":
+-- 
+2.34.1
