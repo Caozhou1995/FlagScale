@@ -5,6 +5,7 @@ from flagscale.launcher.runner import SSHRunner
 from flagscale.launcher.runner import CloudRunner
 
 
+# A_XXX 0
 @hydra.main(version_base=None, config_name="config")
 def main(config: DictConfig) -> None:
     if config.action == "auto_tune":
