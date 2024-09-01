@@ -42,7 +42,13 @@ from flagscale.datasets.sft_dataset import SFTDatasetConfig, SFTDataset
 from flagscale.train.extra_valid import extra_valid_dataset_provider
 from flagscale.train.train import pretrain
 
-
+import numpy as np
+np.object = np.object_
+# np.bool = np.bool_
+np.int = int
+np.float = float
+np.bool = bool
+np.bool8 = bool
 stimer = StragglerDetector()
 
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:

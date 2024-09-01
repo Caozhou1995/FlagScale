@@ -382,7 +382,9 @@ def _get_runner_cmd_train(
     runner_args["redirects"] = redirect
     runner_args["tee"] = tee
 
-    runner_cmd = [backend]
+    runner_cmd = ['dlprof', '--mode', 'pytorch', "--output_path", "/share/project/caozhou/op_list/FlagScale/dlprof", "--reports", "summary", "--formats", "csv,json"]
+    runner_cmd.append(backend)
+    # runner_cmd = [backend]
     for key, value in runner_args.items():
         if isinstance(value, bool):
             if value:
@@ -460,10 +462,10 @@ def _generate_run_script_train(
             # Now, it always appends to the output file
             if background:
                 f.write(
-                    f'nohup bash -c "$cmd; sync" >> {host_output_file} 2>&1 & echo $! > {host_pid_file}\n'
+                    f'nohup bash -c "$cmd; sync" > {host_output_file} 2>&1 & echo $! > {host_pid_file}\n'
                 )
             else:
-                f.write(f'bash -c "$cmd; sync" >> {host_output_file} 2>&1\n')
+                f.write(f'bash -c "$cmd; sync" > {host_output_file} 2>&1\n')
         f.write("\n")
         f.flush()
         os.fsync(f.fileno())
