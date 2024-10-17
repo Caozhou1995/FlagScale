@@ -393,14 +393,14 @@ def pretrain(
         print_rank_0('skipping training (--skip-train is on) ...')
 
         iteration = args.iteration
-
+    args.do_valid = False
     if args.do_valid:
         prefix = f'iteration {iteration} on validation set'
         evaluate_and_print_results(prefix, forward_step_func,
                                    valid_data_iterator, model,
                                    iteration, process_non_loss_data_func, config,
                                    verbose=True, write_to_tensorboard=not args.skip_train)
-
+    args.do_test = False
     if args.do_test:
         prefix = f'iteration {iteration} on test set'
         evaluate_and_print_results(prefix, forward_step_func,
@@ -604,7 +604,7 @@ def get_optimizer_param_scheduler(optimizer):
         if args.lr_wsd_decay_iters is not None:
             wsd_decay_steps = args.lr_wsd_decay_iters * args.global_batch_size
         if args.lr_warmup_fraction is not None:
-            lr_warmup_steps = args.lr_warmup_fraction * lr_decay_steps
+            lr_warmup_steps = int(args.lr_warmup_fraction * lr_decay_steps) + 1
         else:
             lr_warmup_steps = args.lr_warmup_iters * args.global_batch_size
     # Sample-based training.
@@ -1424,7 +1424,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
            (iteration % args.adlr_autoresume_interval == 0):
             check_adlr_autoresume_termination(iteration, model, optimizer,
                                               opt_param_scheduler)
-
+        args.do_valid = False
         # Evaluation
         if args.eval_interval and iteration % args.eval_interval == 0 and \
            args.do_valid:
@@ -1451,7 +1451,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             if args.use_distributed_optimizer and args.overlap_param_gather:
                 optimizer.enable_pre_hook()
             timers('interval-time', log_level=0).start(barrier=True)
-
+        args.extra_valid_interval = False
         # Extra Evaluation
         if args.extra_valid_interval and iteration % args.extra_valid_interval == 0:
             # Need to rebuild the dataloaders for extra validation,

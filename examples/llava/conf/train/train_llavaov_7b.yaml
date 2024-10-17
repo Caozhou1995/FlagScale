@@ -1,11 +1,15 @@
 system:
-  tensor_model_parallel_size: 8
+  tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
   disable_bias_linear: True
   use_flash_attn: True
   use_distributed_optimizer: True
   use_mcore_models: True
   transformer_impl: transformer_engine
+  recompute_method: "uniform"
+  recompute_granularity: "full"
+  recompute_num_layers: 28
+  use_te: True
   precision:
     bf16: True
     attention_softmax_in_fp32: True
@@ -18,50 +22,51 @@ system:
     log_num_zeros_in_grad: True
   checkpoint:
     save_interval: 1000
-    # pretrained_checkpoint: xxxx
+    pretrained_checkpoint: /share/project/caozhou/add_llava_one_version/qwen2.5_1.5b_llava_ov_megatron_ckpt_tp1_te
     dataloader_save: ${experiment.exp_dir}/checkpoints/dataloader
     use_dist_ckpt: False
     ckpt_format: torch
     async_save: False
 
 model:
-  num_layers: 32  
-  hidden_size: 3584 
-  ffn_hidden_size: 18944
-  num_attention_heads: 32 
-  seq_length: 32768
-  max_position_embeddings: 32768
+  num_layers: 28  
+  hidden_size: 1536 
+  ffn_hidden_size: 8960
+  num_attention_heads: 12
+  num_query_groups: 2
+  seq_length: 12288
+  # max_position_embeddings: 32768
+  max_position_embeddings: 12288
   swiglu: True
   normalization: RMSNorm
   init_method_std: 0.014
   attention_dropout: 0.0
   hidden_dropout: 0.0
   clip_grad: 1.0
-  train_iters: 5000
-  micro_batch_size: 1
-  global_batch_size: 1
+  train_iters: 200
+  micro_batch_size: 2
+  global_batch_size: 512
   allow_missing_vision_projection_checkpoint: True
   apply_layernorm_1p: True
-  use_te: True
   group_query_attention: True
-  num_query_groups: 32
   no_masked_softmax_fusion: True
-  untie-embeddings-and-output-weights: True
+  untie-embeddings-and-output-weights: False
   position_embedding_type: rope
   rotary_percent: 1.0
   rotary_base: 1000000
   eod_mask_loss: True
-  freeze_LM: True
-  freeze_ViT: True
+  freeze_LM: False
+  freeze_ViT: False
   patch_dim: 14
   img_h: 384
   img_w: 384
-  language_model_type: qwen2_7b
+  language_model_type: qwen2_1.5b
   vision_model_type: siglip
   disable_vision_class_token: True
-  image_grid_pinpoints: "(1x1),...,(3x3)"
-  image_aspect_ratio: anyres_max_2
-  mm_patch_merge_type: spatial_unpad
+  # image_grid_pinpoints: "(1x1),...,(3x3)"
+  # image_aspect_ratio: anyres_max_2
+  # mm_patch_merge_type: spatial_unpad
+  mm_patch_merge_type: flat
   seed: 12345
 
   optimizer:
@@ -69,18 +74,19 @@ model:
     adam_beta1: 0.9
     adam_beta2: 0.95
     lr_scheduler:
-      lr: 1.0e-5
+      lr: 1.0e-3
       lr_warmup_fraction: .03
       lr_decay_style: cosine
 
 data:
   interleaved_dataset: True
   training_dataset_only: True
-  data_path: xxxx
+  data_path: /share/project/caozhou/add_llava_one_version/flagscale_add_code/FlagScale/megatron/examples/multimodal/pretrain_dataset.yaml
   dataloader_type: external
   split: 100,0,0
   tokenizer:
-    tokenizer_type: QwenTokenizerFS
-    tokenizer_path: xxxx
-    vocab_size: 152064
+    tokenizer_type: QwenTokenizer2FS
+    tokenizer_path: /share/project/caozhou/add_llava_one_version/Qwen2.5-1.5B-Instruct
+    # vocab_size: 152064 # 7b
+    vocab_size: 151936 # 1.5b
     make_vocab_size_divisible_by: 64

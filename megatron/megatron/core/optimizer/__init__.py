@@ -114,14 +114,17 @@ def _get_param_groups(
                 param, 'is_embedding_or_output_parameter', False
             ):
                 is_decoupled_lr = True
-
-            key = (wd_mult, _lr_mult, is_expert_parallel, is_decoupled_lr)
+            if "vision_model" in name:
+                is_vision_model_param = True
+            else:
+                is_vision_model_param = False
+            key = (wd_mult, _lr_mult, is_expert_parallel, is_decoupled_lr, is_vision_model_param)
             if key not in params_map:
                 params_map[key] = []
             params_map[key].append(param)
 
     param_groups = []
-    for (wd_mult, _lr_mult, is_expert_parallel, is_decoupled_lr), params in params_map.items():
+    for (wd_mult, _lr_mult, is_expert_parallel, is_decoupled_lr, is_vision_model_param), params in params_map.items():
         assert len(params) > 0
         param_group = {
             'params': params,
@@ -129,9 +132,9 @@ def _get_param_groups(
             'lr_mult': _lr_mult,
             'is_expert_parallel': is_expert_parallel,
             'is_decoupled_lr': is_decoupled_lr,
+            'is_vision_model_param': is_vision_model_param,
         }
         param_groups.append(param_group)
-
     param_groups = _update_min_and_max_lr_in_param_groups(
         param_groups,
         lr=lr,
@@ -177,7 +180,8 @@ def _update_min_and_max_lr_in_param_groups(
             param_group['max_lr'] = decoupled_lr
             param_group['min_lr'] = decoupled_min_lr
         else:
-            param_group['max_lr'] = lr
+            param_group['max_lr'] = lr if param_group["is_vision_model_param"] else 2e-6
+            print("param_group['max_lr']: ", param_group['max_lr'])
             param_group['min_lr'] = min_lr
     return param_groups
 
@@ -390,6 +394,7 @@ def get_megatron_optimizer(
             filter_fn=lambda g: not g['is_expert_parallel'],
             buffer_name='buffers',
         )
+
         for model_chunk in dense_model_chunks:
             model_chunk.overlap_param_gather_with_optimizer_step = (
                 overlap_param_gather_with_optimizer_step

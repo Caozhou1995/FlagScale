@@ -1,0 +1,9 @@
+__module__: megatron.energon
+__class__: Metadataset
+splits:
+  train:
+    datasets:
+      - weight: 1.
+        path: /share/project/caozhou/onevison_dataset/test_wds/stage1.5-a-1-wds-square
+        subflavors:
+          augmentation: false

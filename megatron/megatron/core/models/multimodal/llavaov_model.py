@@ -17,6 +17,7 @@ from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training import get_args, get_tokenizer
+from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 
 IMAGE_TOKEN_INDEX = -200  # ID for images in the input sequence.
 IGNORE_INDEX = -100  # ID for labels that should be ignored.
@@ -107,7 +108,7 @@ class LLaVAModel(MegatronModule):
 
         # This attribute is needed to check if an all-reduce is required
         # on the word embeddings inside `finalize_model_grads._allreduce_word_embedding_grads`.
-        self.share_embeddings_and_output_weights = False
+        self.share_embeddings_and_output_weights = not args.untie_embeddings_and_output_weights
         if self.add_decoder:
             self.language_model = GPTModel(
                 config=language_transformer_config,
@@ -120,6 +121,7 @@ class LLaVAModel(MegatronModule):
                 pre_process=self.pre_process,
                 post_process=self.post_process,
                 rotary_base=language_rotary_base,
+                share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             )
             self.share_embeddings_and_output_weights = (
                 self.language_model.share_embeddings_and_output_weights
@@ -139,6 +141,7 @@ class LLaVAModel(MegatronModule):
                 class_token_len=class_token_len,
                 patch_dim=patch_dim,
                 add_class_token=add_class_token,
+                ln_post_impl=FusedLayerNorm,
             )
             self._drop_vision_class_token = drop_vision_class_token
             # Map (intermediate) vision model outputs to the language model input dimension.
@@ -166,6 +169,10 @@ class LLaVAModel(MegatronModule):
                 )
                 self.vision_model.register_load_state_dict_post_hook(
                     partial(_load_state_dict_hook_ignore_param_names, vision_extra_state_param_names)
+                )
+                llava_param_names = ["image_newline"]
+                self.register_load_state_dict_post_hook(
+                    partial(_load_state_dict_hook_ignore_param_names, llava_param_names)
                 )
 
     def shared_embedding_or_output_weight(self):
@@ -273,9 +280,7 @@ class LLaVAModel(MegatronModule):
                     images_list.append(image.unsqueeze(0))
                     raise ValueError("Video not supported yet. In the future, we will support video.")
 
-            # [b, c, w, h] -> [b, c, h, w]
-            concat_images = torch.cat([image.permute(0, 1, 3, 2).contiguous() for image in images_list], dim=0)
-            split_sizes = [image.shape[0] for image in images_list]
+            concat_images = torch.cat([image for image in images_list], dim=0)
 
             split_sizes = [image.shape[0] for image in images_list]
             encoded_image_features = self.encode_images(concat_images)
@@ -292,7 +297,8 @@ class LLaVAModel(MegatronModule):
             mm_patch_merge_type = args.mm_patch_merge_type
             assert mm_patch_merge_type in ["flat", "spatial_unpad"], f"Unexpected mm_patch_merge_type: {mm_patch_merge_type}"
             image_aspect_ratio = args.image_aspect_ratio
-            assert "anyres" in image_aspect_ratio, f"Unexpected image_aspect_ratio: {image_aspect_ratio}"
+            if image_aspect_ratio != "square":
+                assert "anyres" in image_aspect_ratio, f"Unexpected image_aspect_ratio: {image_aspect_ratio}"
 
             if mm_patch_merge_type == "flat":
                 image_features = [x.flatten(0, 1) for x in image_features]
@@ -328,9 +334,8 @@ class LLaVAModel(MegatronModule):
                             c, h, w = image_feature.shape
                             times = math.sqrt(h * w / (max_num_patches * unit ** 2))
                             if times > 1.1:
-                                with torch.no_grad():
-                                    image_feature = image_feature[None]
-                                    image_feature = torch.nn.functional.interpolate(image_feature, [int(h // times), int(w // times)], mode="bilinear")[0]
+                                image_feature = image_feature[None]
+                                image_feature = torch.nn.functional.interpolate(image_feature, [int(h // times), int(w // times)], mode="bilinear")[0]
                             image_feature = torch.cat((image_feature, self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)), dim=-1)
                             image_feature = image_feature.flatten(1, 2).transpose(0, 1)
                         elif "unpad" in mm_patch_merge_type:
@@ -377,7 +382,7 @@ class LLaVAModel(MegatronModule):
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
-        # Inserting Images embedding
+        # Inserting images embedding
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             # Text Modality
@@ -453,6 +458,15 @@ class LLaVAModel(MegatronModule):
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
 
+        # For compute shift loss
+        new_input_embeds = new_input_embeds[:, 0: max_len-1, :]
+        new_labels_padded = new_labels_padded[:, 1: max_len]
+        if new_input_embeds.shape[1] == tokenizer_model_max_length - 1:
+            print(f"sequence length reach max length {tokenizer_model_max_length}")
+        # shape = (new_input_embeds.shape[0], max_len, new_input_embeds.shape[2])
+        # new_input_embeds = torch.rand(shape, device=new_input_embeds.device, dtype=new_input_embeds.dtype)
+        # new_labels_padded = torch.randn((new_labels_padded.shape[0], max_len), device=new_labels_padded.device, dtype=torch.float32)
+        # new_labels_padded = new_labels_padded.to(dtype=torch.long)
 
         if _labels is None:
             new_labels = None
@@ -495,7 +509,30 @@ class LLaVAModel(MegatronModule):
     ) -> torch.Tensor:
 
         input_embeds, position_ids, attention_mask, labels, loss_mask = self.prepare_inputs_labels_for_multimodal(input_ids, position_ids, attention_mask, labels, images, modalities, image_sizes)
-        
+        # For the local transformer_impl, the attention mask should be None.
+        # args = get_args()
+        # if not args.use_te:
+        #     attention_mask = None
+        # dump_data = torch.load(f"/share/project/caozhou/add_llava_one_version/dump_data_1_{torch.distributed.get_rank()}.pt")
+        # # def print_md5(tensor, name):
+        # #     import hashlib
+        # #     tensor_bytes = tensor.clone().to(torch.float32).detach().cpu().numpy().tobytes()
+        # #     md5_hash = hashlib.md5(tensor_bytes).hexdigest()
+        # #     print(f"{torch.distributed.get_rank()}:", name, tensor.shape, tensor.dtype, md5_hash, tensor.clone().to(torch.float32).sum())
+        # attention_mask = dump_data["attention_mask"]
+        # input_embeds = dump_data["inputs_embeds"]
+        # # raise ValueError("input_embeds: ", input_embeds.shape)
+        # labels = dump_data["labels"]
+        # torch.distributed.barrier()
+        # # print_md5(input_embeds, "inputs_embeds")
+        # # print_md5(labels, "labels")
+        # # print("attention_mask", attention_mask)
+        # input_embeds = input_embeds[:, 0: input_embeds.size(1)-1, :]
+        # labels = labels[:, 1: labels.size(1)]
+        # loss_mask = torch.where(labels == IGNORE_INDEX, torch.tensor(0), torch.tensor(1))
+
+        # Attention mask should be None for the language model forward.
+        attention_mask = None
         # convert to [s, b, h]
         input_embeds = input_embeds.transpose(1, 0).contiguous()
 

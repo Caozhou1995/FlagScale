@@ -4,6 +4,6 @@ splits:
   train:
     datasets:
       - weight: 1.
-        path: xxxx
+        path: /share/project/caozhou/add_llava_one_version/test_data_for_ds_and_fs/test_data/stage1
         subflavors:
           augmentation: false

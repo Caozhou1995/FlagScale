@@ -248,6 +248,13 @@ class GPTModel(LanguageModule):
             # [s b h] => [b s h]
             return logits.transpose(0, 1).contiguous()
 
+        # raise ValueError("logits: ", logits)
+        # import torch
+        # # raise ValueError("logits: ", logits.shape)
+        # shift_logits = logits.permute(1, 0, 2)[..., :-1, :].contiguous()
+        # shift_labels = labels[..., 1:].contiguous()
+        # loss = torch.nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        # raise ValueError(shift_labels, loss)
         loss = self.compute_language_model_loss(labels, logits)
 
         return loss
