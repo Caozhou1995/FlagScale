@@ -16,6 +16,7 @@ class ModelParallelConfig:
     ###################
     # Model parallelism
     ###################
+    encoder_pipeline_model_parallel_size: int = 0
     tensor_model_parallel_size: int = 1
     """Intra-layer model parallelism. Splits tensors across GPU ranks."""
 

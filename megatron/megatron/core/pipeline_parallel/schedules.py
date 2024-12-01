@@ -1376,7 +1376,6 @@ def forward_backward_pipelining_without_interleaving(
         config=config,
         encoder_decoder_xattn=encoder_decoder_xattn,
     )
-
     # Input, output tensors only need to be saved when doing backward passes
     input_tensors = None
     output_tensors = None
@@ -1400,6 +1399,11 @@ def forward_backward_pipelining_without_interleaving(
             checkpoint_activations_microbatch = None
 
         input_tensor = recv_forward(recv_tensor_shapes, config)
+        # if  input_tensor and input_tensor[0] is not None:
+        #     print("recv_forward: ", input_tensor[0].shape, input_tensor[0].dtype)
+        # else:
+        #     print("recv_forward: ", None)
+
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -1414,7 +1418,9 @@ def forward_backward_pipelining_without_interleaving(
             current_microbatch=i,
             encoder_decoder_xattn=encoder_decoder_xattn,
         )
+        # print("send_forward: ", output_tensor[0].shape, output_tensor[0].dtype)
         send_forward(output_tensor, send_tensor_shapes, config)
+
         total_num_tokens += num_tokens.item()
 
         if not forward_only:
@@ -1427,7 +1433,10 @@ def forward_backward_pipelining_without_interleaving(
     # receive this tensor here.
     if num_microbatches_remaining > 0:
         input_tensor = recv_forward(recv_tensor_shapes, config)
-
+        # if  input_tensor and input_tensor[0] is not None:
+        #     print("recv_forward*: ", input_tensor[0].shape, input_tensor[0].dtype)
+        # else:
+        #     print("recv_forward*: ", None)
     # Run 1F1B in steady state.
     for i in range(num_microbatches_remaining):
         last_iteration = i == (num_microbatches_remaining - 1)

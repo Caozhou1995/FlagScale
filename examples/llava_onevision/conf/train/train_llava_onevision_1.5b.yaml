@@ -1,14 +1,18 @@
 system:
-  tensor_model_parallel_size: 1
-  pipeline_model_parallel_size: 1
+  tensor_model_parallel_size: 2
+  pipeline_model_parallel_size: 2
+
+  encoder_pipeline_model_parallel_size: 1
+  variable_seq_lengths: True
+
   disable_bias_linear: True
   use_flash_attn: True
   use_distributed_optimizer: True
   use_mcore_models: True
   transformer_impl: transformer_engine
-  recompute_method: "uniform"
-  recompute_granularity: "full"
-  recompute_num_layers: 1
+  # recompute_method: "uniform"
+  # recompute_granularity: "full"
+  # recompute_num_layers: 1
   use_te: True
   precision:
     bf16: True
@@ -22,7 +26,7 @@ system:
     log_num_zeros_in_grad: True
   checkpoint:
     save_interval: 1000
-    pretrained_checkpoint: xxxx
+    # pretrained_checkpoint: /share/project/caozhou/add_llava_one_version/qwen2.5_1.5b_llava_ov_megatron_ckpt_tp1_te
     dataloader_save: ${experiment.exp_dir}/checkpoints/dataloader
     use_dist_ckpt: False
     ckpt_format: torch
@@ -45,7 +49,7 @@ model:
   clip_grad: 1.0
   train_iters: 10
   eval_iters: 0
-  micro_batch_size: 2
+  micro_batch_size: 32
   global_batch_size: 512
   allow_missing_vision_projection_checkpoint: True
   apply_layernorm_1p: True
@@ -79,12 +83,12 @@ model:
 data:
   interleaved_dataset: True
   training_dataset_only: True
-  data_path: xxxx
+  data_path: /share/project/caozhou/add_llava_one_version/flagscale_add_code/FlagScale/megatron/examples/multimodal/pretrain_dataset.yaml
   dataloader_type: external
   split: 100,0,0
   tokenizer:
     tokenizer_type: Qwen2TokenizerFS
-    tokenizer_path: xxxx
+    tokenizer_path: /share/project/caozhou/add_llava_one_version/Qwen2.5-1.5B-Instruct
     # vocab_size: 152064 # 7b
     vocab_size: 151936 # 1.5b
     make_vocab_size_divisible_by: 64

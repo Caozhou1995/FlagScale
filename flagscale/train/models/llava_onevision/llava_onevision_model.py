@@ -104,9 +104,9 @@ class LLaVAOneVisionModel(MegatronModule):
         self.vision_projection = None
         self.language_model = None
         args = get_args()
-
+        print("self.pre_process, self.post_process, self.add_encoder, self.add_decoder: ", self.pre_process, self.post_process, self.add_encoder, self.add_decoder)
         # Init image_newline
-        if "unpad" in args.mm_patch_merge_type:
+        if "unpad" in args.mm_patch_merge_type and self.add_encoder:
             embed_std = 1 / torch.sqrt(
                 torch.tensor(args.hidden_size, dtype=torch.bfloat16)
             )
@@ -120,6 +120,7 @@ class LLaVAOneVisionModel(MegatronModule):
         )
 
         if self.add_decoder:
+            logging.getLogger(__name__).info(f"language_transformer_config: {language_transformer_config}")
             self.language_model = GPTModel(
                 config=language_transformer_config,
                 transformer_layer_spec=language_transformer_layer_spec,
@@ -133,6 +134,7 @@ class LLaVAOneVisionModel(MegatronModule):
                 rotary_base=language_rotary_base,
                 share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             )
+            # print("self.language_model: ", self.language_model)
             self._language_max_sequence_length = language_max_sequence_length
             self._language_is_pipeline_parallel = (
                 language_transformer_config.pipeline_model_parallel_size > 1
@@ -140,6 +142,7 @@ class LLaVAOneVisionModel(MegatronModule):
 
         class_token_len = 1
         if self.add_encoder:
+            logging.getLogger(__name__).info(f"vision_transformer_config: {vision_transformer_config}")
             self.vision_model = CLIPViTModel(
                 vision_transformer_config,
                 vision_transformer_layer_spec,
@@ -152,6 +155,7 @@ class LLaVAOneVisionModel(MegatronModule):
             )
             self._drop_vision_class_token = drop_vision_class_token
             # Map (intermediate) vision model outputs to the language model input dimension.
+            logging.getLogger(__name__).info(f"vision_projection: {vision_projection_config}")
             self.vision_projection = MultimodalProjector(
                 vision_projection_config,
                 vision_projection_layer_spec,
@@ -203,12 +207,17 @@ class LLaVAOneVisionModel(MegatronModule):
             input_tensor = [input_tensor]
         assert len(input_tensor) == 1, "input_tensor should only be length 1 for llava"
 
+        # Without pipeline
         if self.add_encoder and self.add_decoder:
             self.vision_model.set_input_tensor(input_tensor[0])
+        # First pipeline stage
         elif self.add_encoder:
             self.vision_model.set_input_tensor(input_tensor[0])
-        elif self.pre_process:
+        # Without encoder and in the second stage
+        elif self.pre_process and self.add_decoder:
+            # print("pre_process input_tensor: ", input_tensor[0])
             self.encoder_hidden_state = input_tensor[0]
+        # Other pipeline stage
         else:
             self.language_model.set_input_tensor(input_tensor[0])
 
@@ -657,6 +666,363 @@ class LLaVAOneVisionModel(MegatronModule):
 
         return new_input_embeds, position_ids, attention_mask, new_labels, loss_mask
 
+    def get_image_features(self, images, modalities, image_sizes):
+        # Process image embedding
+        args = get_args()
+        vision_tower = self.vision_model
+        image_features = None
+        if isinstance(modalities, str):
+            modalities = [modalities]
+
+        if type(images) is list or images.ndim == 5:
+            if type(images) is list:
+                images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
+
+            video_idx_in_batch = []
+            for _ in range(len(modalities)):
+                if modalities[_] == "video":
+                    video_idx_in_batch.append(_)
+
+            images_list = []
+            for image in images:
+                if image.ndim == 4:
+                    images_list.append(image)
+                else:
+                    images_list.append(image.unsqueeze(0))
+                    raise ValueError(
+                        "Video not supported yet. In the future, we will support video."
+                    )
+
+            concat_images = torch.cat([image for image in images_list], dim=0)
+            split_sizes = [image.shape[0] for image in images_list]
+
+            split_sizes = [image.shape[0] for image in images_list]
+            encoded_image_features = self.encode_images(concat_images)
+
+            # Get every sample image features
+            encoded_image_features = torch.split(encoded_image_features, split_sizes)
+            image_features = []
+            for idx, image_feat in enumerate(encoded_image_features):
+                if idx in video_idx_in_batch:
+                    raise ValueError(
+                        "Video not supported yet. In the future, we will support video."
+                    )
+                else:
+                    image_features.append(image_feat)
+
+            mm_patch_merge_type = args.mm_patch_merge_type
+            assert mm_patch_merge_type in [
+                "flat",
+                "spatial_unpad",
+            ], f"Unexpected mm_patch_merge_type: {mm_patch_merge_type}"
+            image_aspect_ratio = args.image_aspect_ratio
+            if image_aspect_ratio != "square":
+                assert (
+                    "anyres" in image_aspect_ratio
+                ), f"Unexpected image_aspect_ratio: {image_aspect_ratio}"
+
+            if mm_patch_merge_type == "flat":
+                image_features = [x.flatten(0, 1) for x in image_features]
+
+            elif mm_patch_merge_type.startswith("spatial"):
+                new_image_features = []
+                for image_idx, image_feature in enumerate(image_features):
+                    if image_feature.shape[0] > 1:
+                        # Raw image features
+                        base_image_feature = image_feature[0]
+                        # Patch iamge features
+                        image_feature = image_feature[1:]
+                        assert (
+                            args.img_h == args.img_w
+                        ), "Only support square image size."
+                        height = width = args.img_h // args.patch_dim
+                        assert height * width == base_image_feature.shape[0]
+
+                        if "anyres_max" in image_aspect_ratio:
+                            matched_anyres_max_num_patches = re.match(
+                                r"anyres_max_(\d+)", image_aspect_ratio
+                            )
+                            if matched_anyres_max_num_patches:
+                                max_num_patches = int(
+                                    matched_anyres_max_num_patches.group(1)
+                                )
+
+                        if (
+                            image_aspect_ratio == "anyres"
+                            or "anyres_max" in image_aspect_ratio
+                        ):
+                            vision_tower_image_size = args.img_h
+                            assert (
+                                args.image_grid_pinpoints is not None
+                            ), "image_grid_pinpoints must be provided."
+                            num_patch_width, num_patch_height = (
+                                get_anyres_image_grid_shape(
+                                    image_sizes[image_idx],
+                                    args.image_grid_pinpoints,
+                                    vision_tower_image_size,
+                                )
+                            )
+                            image_feature = image_feature.view(
+                                num_patch_height, num_patch_width, height, width, -1
+                            )
+
+                        if (
+                            "unpad" in mm_patch_merge_type
+                            and "anyres_max" in image_aspect_ratio
+                            and matched_anyres_max_num_patches
+                        ):
+                            unit = image_feature.shape[2]
+                            image_feature = image_feature.permute(
+                                4, 0, 2, 1, 3
+                            ).contiguous()
+                            image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+                            image_feature = unpad_image(
+                                image_feature, image_sizes[image_idx]
+                            )
+                            c, h, w = image_feature.shape
+                            times = math.sqrt(h * w / (max_num_patches * unit**2))
+                            if times > 1.1:
+                                image_feature = image_feature[None]
+                                image_feature = torch.nn.functional.interpolate(
+                                    image_feature,
+                                    [int(h // times), int(w // times)],
+                                    mode="bilinear",
+                                )[0]
+                            image_feature = torch.cat(
+                                (
+                                    image_feature,
+                                    self.image_newline[:, None, None]
+                                    .expand(*image_feature.shape[:-1], 1)
+                                    .to(image_feature.device),
+                                ),
+                                dim=-1,
+                            )
+                            image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+                        elif "unpad" in mm_patch_merge_type:
+                            image_feature = image_feature.permute(
+                                4, 0, 2, 1, 3
+                            ).contiguous()
+                            image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+                            image_feature = unpad_image(
+                                image_feature, image_sizes[image_idx]
+                            )
+                            image_feature = torch.cat(
+                                (
+                                    image_feature,
+                                    self.image_newline[:, None, None]
+                                    .expand(*image_feature.shape[:-1], 1)
+                                    .to(image_feature.device),
+                                ),
+                                dim=-1,
+                            )
+                            image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+                        else:
+                            image_feature = image_feature.permute(
+                                0, 2, 1, 3, 4
+                            ).contiguous()
+                            image_feature = image_feature.flatten(0, 3)
+                        if "nobase" in mm_patch_merge_type:
+                            pass
+                        else:
+                            image_feature = torch.cat(
+                                (base_image_feature, image_feature), dim=0
+                            )
+                        new_image_features.append(image_feature)
+                    else:  # single image operations
+                        image_feature = image_feature[0]
+                        if "unpad" in mm_patch_merge_type:
+                            image_feature = torch.cat(
+                                (image_feature, self.image_newline[None]), dim=0
+                            )
+                        new_image_features.append(image_feature)
+                image_features = new_image_features
+            else:
+                raise ValueError(
+                    f"Unexpected mm_patch_merge_type: {args.mm_patch_merge_type}"
+                )
+        else:
+            image_features = self.encode_images(images)
+        
+        return image_features
+
+    def get_image_features_for_last_stage(self, images, modalities, image_sizes):
+        args = get_args()
+        image_features = None
+        with torch.no_grad():
+            if isinstance(modalities, str):
+                modalities = [modalities]
+
+            if type(images) is list or images.ndim == 5:
+                if type(images) is list:
+                    images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
+
+                video_idx_in_batch = []
+                for _ in range(len(modalities)):
+                    if modalities[_] == "video":
+                        video_idx_in_batch.append(_)
+
+                images_list = []
+                for image in images:
+                    if image.ndim == 4:
+                        images_list.append(image)
+                    else:
+                        images_list.append(image.unsqueeze(0))
+                        raise ValueError(
+                            "Video not supported yet. In the future, we will support video."
+                        )
+
+                concat_images = torch.cat([image for image in images_list], dim=0)
+                split_sizes = [image.shape[0] for image in images_list]
+
+                split_sizes = [image.shape[0] for image in images_list]
+                encoded_image_features = torch.full((concat_images.shape[0], (args.img_h // args.patch_dim) ** 2, args.hidden_size), IGNORE_INDEX, device=images[0].device, dtype=images[0].dtype)
+
+                # Get every sample image features
+                encoded_image_features = torch.split(encoded_image_features, split_sizes)
+                image_features = []
+                for idx, image_feat in enumerate(encoded_image_features):
+                    if idx in video_idx_in_batch:
+                        raise ValueError(
+                            "Video not supported yet. In the future, we will support video."
+                        )
+                    else:
+                        image_features.append(image_feat)
+
+                mm_patch_merge_type = args.mm_patch_merge_type
+                assert mm_patch_merge_type in [
+                    "flat",
+                    "spatial_unpad",
+                ], f"Unexpected mm_patch_merge_type: {mm_patch_merge_type}"
+                image_aspect_ratio = args.image_aspect_ratio
+                if image_aspect_ratio != "square":
+                    assert (
+                        "anyres" in image_aspect_ratio
+                    ), f"Unexpected image_aspect_ratio: {image_aspect_ratio}"
+
+                if mm_patch_merge_type == "flat":
+                    image_features = [x.flatten(0, 1) for x in image_features]
+
+                elif mm_patch_merge_type.startswith("spatial"):
+                    new_image_features = []
+                    for image_idx, image_feature in enumerate(image_features):
+                        if image_feature.shape[0] > 1:
+                            # Raw image features
+                            base_image_feature = image_feature[0]
+                            # Patch iamge features
+                            image_feature = image_feature[1:]
+                            assert (
+                                args.img_h == args.img_w
+                            ), "Only support square image size."
+                            height = width = args.img_h // args.patch_dim
+                            assert height * width == base_image_feature.shape[0]
+
+                            if "anyres_max" in image_aspect_ratio:
+                                matched_anyres_max_num_patches = re.match(
+                                    r"anyres_max_(\d+)", image_aspect_ratio
+                                )
+                                if matched_anyres_max_num_patches:
+                                    max_num_patches = int(
+                                        matched_anyres_max_num_patches.group(1)
+                                    )
+
+                            if (
+                                image_aspect_ratio == "anyres"
+                                or "anyres_max" in image_aspect_ratio
+                            ):
+                                vision_tower_image_size = args.img_h
+                                assert (
+                                    args.image_grid_pinpoints is not None
+                                ), "image_grid_pinpoints must be provided."
+                                num_patch_width, num_patch_height = (
+                                    get_anyres_image_grid_shape(
+                                        image_sizes[image_idx],
+                                        args.image_grid_pinpoints,
+                                        vision_tower_image_size,
+                                    )
+                                )
+                                image_feature = image_feature.view(
+                                    num_patch_height, num_patch_width, height, width, -1
+                                )
+
+                            if (
+                                "unpad" in mm_patch_merge_type
+                                and "anyres_max" in image_aspect_ratio
+                                and matched_anyres_max_num_patches
+                            ):
+                                unit = image_feature.shape[2]
+                                image_feature = image_feature.permute(
+                                    4, 0, 2, 1, 3
+                                ).contiguous()
+                                image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+                                image_feature = unpad_image(
+                                    image_feature, image_sizes[image_idx]
+                                )
+                                c, h, w = image_feature.shape
+                                times = math.sqrt(h * w / (max_num_patches * unit**2))
+                                if times > 1.1:
+                                    image_feature = image_feature[None]
+                                    image_feature = torch.nn.functional.interpolate(
+                                        image_feature,
+                                        [int(h // times), int(w // times)],
+                                        mode="bilinear",
+                                    )[0]
+                                image_feature = torch.cat(
+                                    (
+                                        image_feature,
+                                        self.image_newline[:, None, None]
+                                        .expand(*image_feature.shape[:-1], 1)
+                                        .to(image_feature.device),
+                                    ),
+                                    dim=-1,
+                                )
+                                image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+                            elif "unpad" in mm_patch_merge_type:
+                                image_feature = image_feature.permute(
+                                    4, 0, 2, 1, 3
+                                ).contiguous()
+                                image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+                                image_feature = unpad_image(
+                                    image_feature, image_sizes[image_idx]
+                                )
+                                image_feature = torch.cat(
+                                    (
+                                        image_feature,
+                                        self.image_newline[:, None, None]
+                                        .expand(*image_feature.shape[:-1], 1)
+                                        .to(image_feature.device),
+                                    ),
+                                    dim=-1,
+                                )
+                                image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+                            else:
+                                image_feature = image_feature.permute(
+                                    0, 2, 1, 3, 4
+                                ).contiguous()
+                                image_feature = image_feature.flatten(0, 3)
+                            if "nobase" in mm_patch_merge_type:
+                                pass
+                            else:
+                                image_feature = torch.cat(
+                                    (base_image_feature, image_feature), dim=0
+                                )
+                            new_image_features.append(image_feature)
+                        else:  # single image operations
+                            image_feature = image_feature[0]
+                            if "unpad" in mm_patch_merge_type:
+                                image_feature = torch.cat(
+                                    (image_feature, self.image_newline[None]), dim=0
+                                )
+                            new_image_features.append(image_feature)
+                    image_features = new_image_features
+                else:
+                    raise ValueError(
+                        f"Unexpected mm_patch_merge_type: {args.mm_patch_merge_type}"
+                    )
+            else:
+                image_features = torch.full((images.shape[0], (args.img_h // args.patch_dim) ** 2, args.hidden_size), IGNORE_INDEX, device=images.device, dtype=images.dtype)
+
+        return image_features
+
     # Currently only suitable for training
     def forward(
         self,
@@ -670,26 +1036,239 @@ class LLaVAOneVisionModel(MegatronModule):
         image_token_index: Optional[int] = IMAGE_TOKEN_INDEX,
     ) -> torch.Tensor:
 
-        input_embeds, position_ids, attention_mask, labels, loss_mask = (
-            self.prepare_inputs_labels_for_multimodal(
-                input_ids,
-                position_ids,
-                attention_mask,
-                labels,
-                images,
-                modalities,
-                image_sizes,
+        has_images = images is not None
+        new_input_embeds = []
+        new_labels = []
+        loss_mask = None
+        cur_image_idx = 0
+        if self.add_encoder:
+            assert has_images, "In the LLaVA OneVision model, the text modality data automatically creates a image."
+        args = get_args()
+        # Pipeline stage 0
+        if self.add_encoder:
+            # Process image embedding
+            image_features = self.get_image_features(images, modalities, image_sizes)
+        
+        elif self.add_decoder and self.pre_process:
+           # Other pipeline stage
+            image_features = self.encoder_hidden_state
+            # print("encoder_hidden_state: ", image_features.shape, image_features)
+            assert len(image_features.shape) == 3 and image_features.shape[0] == 1
+            image_features = image_features.squeeze(0)
+            split_sizes = image_features[-1, :]
+            # print("split_sizes: ", split_sizes.shape, split_sizes)
+            split_sizes = split_sizes[split_sizes != 0].to(torch.int64).tolist()
+            # print("split_sizes*****: ", split_sizes)
+            image_features = torch.split(image_features[:-1, :].to(torch.bfloat16), split_sizes, dim=0)
+            # for _ in image_features:
+            #     print("recv image feature: ", _, _.shape, _.dtype)
+
+        # Pipeline stage 0
+        if not self.add_decoder:
+            # Send the image fetures to last stage
+            split_sizes = [x.shape[0] for x in image_features]
+            # print("split_sizes: ", split_sizes)
+            split_sizes_tensor = torch.zeros(1, image_features[0].shape[-1], device=image_features[0].device, dtype=torch.float32)
+            split_sizes_tensor[:, :len(split_sizes)] = torch.tensor(split_sizes, dtype=torch.float32).reshape(1, -1)
+            image_features = [x.to(torch.float32) for x in image_features]
+            image_features.append(split_sizes_tensor)
+            concat_image_features = torch.cat(image_features, dim=0).contiguous()
+            concat_image_features = concat_image_features.unsqueeze(0).clone()
+            # print("concat_image_features shape: ", concat_image_features.shape, concat_image_features, concat_image_features.dtype)
+            return concat_image_features, None, loss_mask
+
+        # Process embedding
+        if self.pre_process and self.add_decoder:
+            input_ids = [cur_input_ids[cur_attention_mask] for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)]
+            for batch_idx, cur_input_ids in enumerate(input_ids):
+                num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+                # Text Modality
+                if num_images == 0:
+                    cur_image_features = image_features[cur_image_idx]
+                    cur_input_embeds_1 = self.embed_tokens(cur_input_ids)
+                    cur_input_embeds = torch.cat(
+                        [cur_input_embeds_1, cur_image_features[0:0]], dim=0
+                    )
+                    new_input_embeds.append(cur_input_embeds)
+                    cur_image_idx += 1
+                    continue
+                image_token_indices = (
+                    [-1]
+                    + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist()
+                    + [cur_input_ids.shape[0]]
+                )
+                cur_input_ids_noim = []
+                for i in range(len(image_token_indices) - 1):
+                    cur_input_ids_noim.append(
+                        cur_input_ids[
+                            image_token_indices[i] + 1 : image_token_indices[i + 1]
+                        ]
+                    )
+                # split_sizes = [x.shape[0] for x in cur_labels_noim] is LLaVA-NeXT code, they are equivalent
+                split_sizes = [x.shape[0] for x in cur_input_ids_noim]
+                cur_input_embeds = self.embed_tokens(torch.cat(cur_input_ids_noim))
+                cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+                cur_new_input_embeds = []
+
+                for i in range(num_images + 1):
+                    cur_new_input_embeds.append(cur_input_embeds_no_im[i])
+                    if i < num_images:
+                        try:
+                            cur_image_features = image_features[cur_image_idx]
+                        except IndexError:
+                            cur_image_features = image_features[cur_image_idx - 1]
+                        cur_image_idx += 1
+                        cur_new_input_embeds.append(cur_image_features)
+                # for _ in cur_new_input_embeds:
+                #     print(_.shape)
+                cur_new_input_embeds = torch.cat(cur_new_input_embeds)
+                new_input_embeds.append(cur_new_input_embeds)
+            # Truncate sequences to max length as image embeddings can make the sequence longer
+            tokenizer_model_max_length = args.max_position_embeddings
+            new_input_embeds = [
+                x[:tokenizer_model_max_length]
+                for x, modality in zip(new_input_embeds, modalities)
+            ]
+            # Combine them
+            max_len = max(x.shape[0] for x in new_input_embeds)
+            batch_size = len(new_input_embeds)
+            new_input_embeds_padded = []
+            tokenizer = get_tokenizer()
+            for i, cur_new_embed in enumerate(
+                new_input_embeds
+            ):
+                cur_len = cur_new_embed.shape[0]
+                if tokenizer.padding_side == "left":
+                    new_input_embeds_padded.append(
+                        torch.cat(
+                            (
+                                torch.zeros(
+                                    (max_len - cur_len, cur_new_embed.shape[1]),
+                                    dtype=cur_new_embed.dtype,
+                                    device=cur_new_embed.device,
+                                ),
+                                cur_new_embed,
+                            ),
+                            dim=0,
+                        )
+                    )
+                else:
+                    new_input_embeds_padded.append(
+                        torch.cat(
+                            (
+                                cur_new_embed,
+                                torch.zeros(
+                                    (max_len - cur_len, cur_new_embed.shape[1]),
+                                    dtype=cur_new_embed.dtype,
+                                    device=cur_new_embed.device,
+                                ),
+                            ),
+                            dim=0,
+                        )
+                    )
+            new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
+
+        # Process label and loss_mask
+        if self.post_process and self.add_decoder:
+            cur_image_idx = 0
+            if args.encoder_pipeline_model_parallel_size > 0:
+                image_features = self.get_image_features_for_last_stage(images, modalities, image_sizes)
+            labels = [
+                cur_labels[cur_attention_mask]
+                for cur_labels, cur_attention_mask in zip(labels, attention_mask)
+            ]
+            new_labels = []
+            for batch_idx, cur_input_ids in enumerate(input_ids):
+                num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+                # Text Modality
+                if num_images == 0:
+                    new_labels.append(labels[batch_idx])
+                    cur_image_idx += 1
+                    continue
+
+                image_token_indices = (
+                    [-1]
+                    + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist()
+                    + [cur_input_ids.shape[0]]
+                )
+                cur_labels = labels[batch_idx]
+                cur_labels_noim = []
+                for i in range(len(image_token_indices) - 1):
+                    cur_labels_noim.append(
+                        cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]]
+                    )
+                split_sizes = [x.shape[0] for x in cur_labels_noim]
+                cur_new_labels = []
+
+                for i in range(num_images + 1):
+                    cur_new_labels.append(cur_labels_noim[i])
+                    if i < num_images:
+                        try:
+                            cur_image_features = image_features[cur_image_idx]
+                        except IndexError:
+                            cur_image_features = image_features[cur_image_idx - 1]
+                        cur_new_labels.append(
+                            torch.full(
+                                (cur_image_features.shape[0],),
+                                IGNORE_INDEX,
+                                device=cur_labels.device,
+                                dtype=cur_labels.dtype,
+                        )
+                    )
+
+                cur_new_labels = torch.cat(cur_new_labels)
+                new_labels.append(cur_new_labels)
+
+            # Truncate sequences to max length as image embeddings can make the sequence longer
+            tokenizer_model_max_length = args.max_position_embeddings
+            new_labels = [
+                x[:tokenizer_model_max_length]
+                for x, modality in zip(new_labels, modalities)
+            ]
+            # Combine them
+            max_len = max(x.shape[0] for x in new_labels)
+            batch_size = len(new_labels)
+
+            new_labels_padded = torch.full(
+                (batch_size, max_len),
+                IGNORE_INDEX,
+                dtype=new_labels[0].dtype,
+                device=new_labels[0].device,
             )
-        )
-        # Attention mask should be None for the language model forward.
-        attention_mask = None
-        # Convert to [s, b, h]
-        input_embeds = input_embeds.transpose(1, 0).contiguous()
+
+            tokenizer = get_tokenizer()
+            for i, cur_new_labels in enumerate(
+                new_labels
+            ):
+                cur_len = cur_new_labels.shape[0]
+                if tokenizer.padding_side == "left":
+                    if cur_len > 0:
+                        new_labels_padded[i, -cur_len:] = cur_new_labels
+                else:
+                    if cur_len > 0:
+                        new_labels_padded[i, :cur_len] = cur_new_labels
+
+
+            new_labels = new_labels_padded
+            loss_mask = torch.where(
+                new_labels == IGNORE_INDEX, torch.tensor(0), torch.tensor(1)
+            )
+
+        input_embeds, position_ids, attention_mask, labels, loss_mask = new_input_embeds, None, None, new_labels, loss_mask
+
+        # middle pipeline stage
+        if not self.pre_process and not self.post_process:
+            input_embeds, position_ids, attention_mask, labels, loss_mask = None, None, None, None, None
+
+        if self.pre_process and self.add_decoder:
+            # Convert to [s, b, h]
+            input_embeds = input_embeds.transpose(1, 0).contiguous()
+
         # Language model forward
         # labels should be None for the language model forward and return the logits
         output = self.language_model(
             input_ids=None,
-            position_ids=None,
+            position_ids=position_ids,
             attention_mask=attention_mask,
             decoder_input=input_embeds,
             labels=None,

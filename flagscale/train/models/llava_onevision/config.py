@@ -54,6 +54,7 @@ def get_language_model_config(config):
 
 def get_vision_model_config(config, apply_query_key_layer_scaling):
     """Get the vision model config."""
+    config.pipeline_dtype = torch.float32
     if config.vision_model_type == "clip":
         config.num_layers = 24
         config.num_attention_heads = 16
@@ -111,6 +112,7 @@ def get_vision_model_config(config, apply_query_key_layer_scaling):
 
 def get_vision_projection_config(config, hidden_size):
     """Get the vision projection config."""
+    config.pipeline_dtype = torch.float32
     config.gated_linear_unit = False
     config.bias_activation_fusion = False
     config.add_bias_linear = False

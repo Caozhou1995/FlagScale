@@ -8,13 +8,16 @@ import torch
 from safetensors.torch import load_file
 
 
-def convert(input_path, output_path, tensor_parallel_size, use_te):
+def convert(input_path, output_path, tensor_parallel_size, use_te, pipeline_parallel_size=None):
     device = "cuda"
 
     state_dict = load_file(os.path.join(input_path, "model.safetensors"), device=device)
 
     new_state_dicts = [{"model": dict()} for _ in range(tensor_parallel_size)]
-
+    pp_stage_name_mapping = {}
+    pp_name_stage_mapping = {}
+    stage = 0
+    num_layers = 28 # LLM layers
     # Process language model
     # Indices from mapping pytorch multihead attention to megatron.
     hidden_dim = 1536
@@ -76,9 +79,11 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
         gate_up_params = set()
         if "model.embed_tokens.weight" in name:
             new_name = "language_model.embedding.word_embeddings.weight"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 1, pipeline_parallel_size)
             chunk_dim = 0
         elif "model.image_newline" in name:
             new_name = "image_newline"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
         elif "lm_head.weight" in name:
             # share weight
             continue
@@ -89,17 +94,24 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
         # the norm after last layer
         elif "model.norm.weight" in name:
             new_name = "language_model.decoder.final_layernorm.weight"
+            if pipeline_parallel_size is not None:
+                stage = pipeline_parallel_size # last stage
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, stage, pipeline_parallel_size)
         elif "model.layers" not in name:
             continue
         elif "model.layers" in name:
             layer_idx = name.split(".")[2]
             base = f"language_model.decoder.layers.{layer_idx}"
+            if pipeline_parallel_size is not None:
+                stage = 1 + layer_idx // (num_layers // pipeline_parallel_size)
             if (
                 "self_attn.q_proj.weight" in name
                 or "self_attn.k_proj.weight" in name
                 or "self_attn.v_proj.weight" in name
             ):
                 new_name = f"{base}.self_attention.linear_qkv.weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, stage, pipeline_parallel_size)
+
                 if new_name not in qkv_params:
                     # q_proj, k_proj, v_proj
                     split_name = name.split(".")
@@ -133,6 +145,7 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
                 or "self_attn.v_proj.bias" in name
             ):
                 new_name = f"{base}.self_attention.linear_qkv.bias"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, stage, pipeline_parallel_size)
                 if new_name not in qkv_params:
                     # q_proj, k_proj, v_proj
                     split_name = name.split(".")
@@ -160,13 +173,16 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
                     continue
             elif "self_attn.o_proj.weight" in name:
                 new_name = f"{base}.self_attention.linear_proj.weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, stage, pipeline_parallel_size)
                 chunk_dim = 1
             elif "input_layernorm.weight" in name:
                 new_name = f"{base}.input_layernorm.weight"
                 if use_te:
                     new_name = f"{base}.self_attention.linear_qkv.layer_norm_weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, stage, pipeline_parallel_size)
             elif "mlp.gate_proj.weight" in name or "mlp.up_proj.weight" in name:
                 new_name = f"{base}.mlp.linear_fc1.weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, stage, pipeline_parallel_size)
                 if new_name not in gate_up_params:
                     # gate, up
                     split_name = name.split(".")
@@ -188,11 +204,13 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
                     continue
             elif "mlp.down_proj.weight" in name:
                 new_name = f"{base}.mlp.linear_fc2.weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, stage, pipeline_parallel_size)
                 chunk_dim = 1
             elif "post_attention_layernorm.weight" in name:
                 new_name = f"{base}.pre_mlp_layernorm.weight"
                 if use_te:
                     new_name = f"{base}.mlp.linear_fc1.layer_norm_weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, stage, pipeline_parallel_size)
 
         assert new_name != "", f"unexpected layer name {name}"
 
@@ -220,6 +238,11 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
                         new_name[: new_name.rfind(".") + 1] + "_extra_state"
                     )  # Replace the weight name.
                     new_state_dicts[i]["model"][extra_state_name] = None
+                    for stage in pp_stage_name_mapping:
+                        if new_name in pp_stage_name_mapping[stage]:
+                            add_pipeline(extra_state_name, pp_stage_name_mapping, pp_name_stage_mapping, stage, pipeline_parallel_size)
+                            break
+
         print(f"{new_name} processed")
 
     # Process vision tower
@@ -255,14 +278,19 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
         qkv_params = set()
         if "position_embedding" in name:
             new_name = "vision_model.position_embeddings.weight"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
         elif "post_layernorm.weight" in name:
             new_name = "vision_model.ln_post.weight"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
         elif "post_layernorm.bias" in name:
             new_name = "vision_model.ln_post.bias"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
         elif "patch_embedding.weight" in name:
             new_name = "vision_model.conv1.weight"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
         elif "patch_embedding.bias" in name:
             new_name = "vision_model.conv1.bias"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
         elif "encoder.layers" in name:
             layer_idx = name.split(".")[6]
             base = f"vision_model.decoder.layers.{layer_idx}"
@@ -276,6 +304,7 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
                 or "self_attn.v_proj.weight" in name
             ):
                 new_name = f"{base}.self_attention.linear_qkv.weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
                 if new_name not in qkv_params:
                     # q_proj, k_proj, v_proj
                     split_name = name.split(".")
@@ -309,6 +338,7 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
                 or "self_attn.v_proj.bias" in name
             ):
                 new_name = f"{base}.self_attention.linear_qkv.bias"
+                add_pipeline(new_name, pp_stage_name_mapping, 0, pipeline_parallel_size)
                 if new_name not in qkv_params:
                     # q_proj, k_proj, v_proj
                     split_name = name.split(".")
@@ -336,36 +366,46 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
                     continue
             elif "attn.out_proj.weight" in name:
                 new_name = f"{base}.self_attention.linear_proj.weight"
+                add_pipeline(new_name, pp_stage_name_mapping, 0, pipeline_parallel_size)
                 chunk_dim = 1
             elif "attn.out_proj.bias" in name:
                 new_name = f"{base}.self_attention.linear_proj.bias"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
             elif "layer_norm1.weight" in name:
                 new_name = f"{base}.input_layernorm.weight"
                 if use_te:
                     new_name = f"{base}.self_attention.linear_qkv.layer_norm_weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
             elif "layer_norm1.bias" in name:
                 new_name = f"{base}.input_layernorm.bias"
                 if use_te:
                     new_name = f"{base}.self_attention.linear_qkv.layer_norm_bias"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
             elif "mlp.fc1.weight" in name:
                 new_name = f"{base}.mlp.linear_fc1.weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
                 chunk_dim = 0
             elif "mlp.fc1.bias" in name:
                 new_name = f"{base}.mlp.linear_fc1.bias"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
                 chunk_dim = 0
             elif "mlp.fc2.weight" in name:
                 new_name = f"{base}.mlp.linear_fc2.weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
                 chunk_dim = 1
             elif "mlp.fc2.bias" in name:
                 new_name = f"{base}.mlp.linear_fc2.bias"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
             elif "layer_norm2.weight" in name:
                 new_name = f"{base}.pre_mlp_layernorm.weight"
                 if use_te:
                     new_name = f"{base}.mlp.linear_fc1.layer_norm_weight"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
             elif "layer_norm2.bias" in name:
                 new_name = f"{base}.pre_mlp_layernorm.bias"
                 if use_te:
                     new_name = f"{base}.mlp.linear_fc1.layer_norm_bias"
+                add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
 
         assert new_name != "", f"unexpected layer name {name}"
 
@@ -393,6 +433,7 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
                         new_name[: new_name.rfind(".") + 1] + "_extra_state"
                     )  # Replace the weight name.
                     new_state_dicts[i]["model"][extra_state_name] = None
+                    add_pipeline(extra_state_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
 
         print(f"{new_name} processed")
 
@@ -407,15 +448,19 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
         # This is used for chunking some tensors to target tensor parallel size.
         if name == "model.mm_projector.0.weight":
             new_name = "vision_projection.encoder.linear_fc1.weight"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
             chunk_dim = 0
         elif name == "model.mm_projector.0.bias":
             new_name = "vision_projection.encoder.linear_fc1.bias"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
             chunk_dim = 0
         elif name == "model.mm_projector.2.weight":
             new_name = "vision_projection.encoder.linear_fc2.weight"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
             chunk_dim = 1
         elif name == "model.mm_projector.2.bias":
             new_name = "vision_projection.encoder.linear_fc2.bias"
+            add_pipeline(new_name, pp_stage_name_mapping, pp_name_stage_mapping, 0, pipeline_parallel_size)
 
         assert new_name != "", f"unexpected name {name}"
 
@@ -428,12 +473,26 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
             # chunk() creates a view of a bigger tensor. clone() is used here to avoid excessive storage.
             new_state_dicts[i]["model"][new_name] = new_tensors[i].clone()
         print(f"{new_name} processed")
+    
+    if pipeline_parallel_size is None:
+        for i in range(tensor_parallel_size):
+            output_dir_tp = os.path.join(output_path, "iter_0000001", f"mp_rank_0{i}")
+            os.makedirs(output_dir_tp)
+            output_path_tp = os.path.join(output_dir_tp, "model_optim_rng.pt")
+            torch.save(new_state_dicts[i], output_path_tp)
+    else:
+        # If pipeline_parallel_size is not None, it means encoder_pipeline_model_parallel_size is 1 and the pipeline_model_parallel_size is the given value.
+        for i in range(tensor_parallel_size):
+            for j in range(pipeline_parallel_size):
+                output_dir_tp_pp = os.path.join(output_path, "iter_0000001", f"mp_rank_{i:02}_0{j:02}")
+                os.makedirs(output_dir_tp_pp)
+                output_path_tp = os.path.join(output_dir_tp_pp, "model_optim_rng.pt")
+                new_state_pp_dict = {"model": {}}
+                for name in new_state_dicts[i]["model"]:
+                    if pp_name_stage_mapping[name] == j:
+                        new_state_pp_dict["model"][name] = new_state_dicts[i]["model"][name]
+                torch.save(new_state_dicts[i], output_path_tp)
 
-    for i in range(tensor_parallel_size):
-        output_dir_tp = os.path.join(output_path, "iter_0000001", f"mp_rank_0{i}")
-        os.makedirs(output_dir_tp)
-        output_path_tp = os.path.join(output_dir_tp, "model_optim_rng.pt")
-        torch.save(new_state_dicts[i], output_path_tp)
 
     latest_checkpointed_iteration = os.path.join(
         output_path, "latest_checkpointed_iteration.txt"
@@ -442,6 +501,18 @@ def convert(input_path, output_path, tensor_parallel_size, use_te):
     with open(latest_checkpointed_iteration, "w") as f:
         f.write("1")
 
+
+def add_pipeline(name, stage_name_mapping, name_stage_mapping, stage=0, pipeline_parallel_size=None, ):
+    if pipeline_parallel_size is None:
+        return
+
+    if stage not in stage_name_mapping:
+        stage_name_mapping[stage] = set()
+
+    stage_name_mapping[stage].add(name)
+    name_stage_mapping[name] = stage
+
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

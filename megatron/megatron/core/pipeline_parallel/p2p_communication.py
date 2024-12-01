@@ -278,7 +278,7 @@ def _communicate(
 
     tensor_recv_prev_func = None
     tensor_recv_next_func = None
-
+    # print("variable_seq_lengths: ", config.variable_seq_lengths)
     if not config.variable_seq_lengths:
         recv_prev_shape = tensor_shape
         recv_next_shape = tensor_shape
@@ -286,21 +286,32 @@ def _communicate(
         recv_prev_shape, recv_next_shape = _communicate_shapes(
             tensor_send_next, tensor_send_prev, recv_prev, recv_next, config
         )
+        # print("recv_prev_shape, recv_next_shape: ", recv_prev_shape, recv_next_shape)
 
     def create_tensor_recv_prev():
+        # print("create_tensor_recv_prev: ", config.pipeline_dtype, config)
+        dtype = config.pipeline_dtype
+        if config.encoder_pipeline_model_parallel_size == 1:
+            if get_pipeline_model_parallel_rank() == 1:
+                dtype = torch.float32
         return torch.empty(
             recv_prev_shape,
             requires_grad=True,
             device=torch.cuda.current_device() if "gloo" not in group.name() else torch.device("cpu"),
-            dtype=config.pipeline_dtype,
+            dtype=dtype,
         )
 
     def create_tensor_recv_next():
+        # print("recv_next_shape: ", config.pipeline_dtype)
+        dtype = config.pipeline_dtype
+        if config.encoder_pipeline_model_parallel_size == 1:
+            if get_pipeline_model_parallel_rank() == 0:
+                dtype = torch.float32
         return torch.empty(
             recv_next_shape,
             requires_grad=True,
             device=torch.cuda.current_device() if "gloo" not in group.name() else torch.device("cpu"),
-            dtype=config.pipeline_dtype,
+            dtype=dtype,
         )
 
     if recv_prev:
@@ -323,6 +334,7 @@ def _communicate(
             )
         tensor_recv_next_func = create_tensor_recv_next
 
+    config.batch_p2p_comm = False
     # Send tensors in both the forward and backward directions as appropriate.
     if config.use_ring_exchange_p2p:
 
@@ -373,7 +385,7 @@ def _communicate(
             tensor_recv_next_list.append(tensor_recv_next)
         else:
             tensor_recv_next = None
-
+        # print("prev_pipeline_rank, next_pipeline_rank, tensor_send_next: ", pr, nr, tensor_send_next)
         reqs.extend(
             p2p_func(
                 tensor_send_prev=tensor_send_prev,
@@ -433,6 +445,7 @@ def recv_forward(tensor_shape: Shape, config: ModelParallelConfig) -> torch.Tens
     else:
         if config.timers is not None:
             config.timers('forward-recv', log_level=2).start()
+        # print("_communicate recv_forward")
         input_tensor, _, _ = _communicate(
             tensor_send_next=None,
             tensor_send_prev=None,
@@ -441,6 +454,7 @@ def recv_forward(tensor_shape: Shape, config: ModelParallelConfig) -> torch.Tens
             tensor_shape=tensor_shape,
             config=config,
         )
+        # print("input_tensor: ", input_tensor)
         if config.timers is not None:
             config.timers('forward-recv').stop()
     return input_tensor

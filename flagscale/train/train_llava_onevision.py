@@ -28,14 +28,20 @@ from flagscale.train.models.llava_onevision.llava_onevision_model import (
     IGNORE_INDEX,
     IMAGE_TOKEN_INDEX,
 )
-from examples.multimodal.layer_specs import (
+from flagscale.train.models.llava_onevision.layer_specs import (
     get_layer_spec,
     get_mlp_module_spec,
     get_layer_spec_te,
 )
 from megatron.training.utils import average_losses_across_data_parallel_group
+from megatron.core.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_pipeline_model_parallel_world_size,
+    is_pipeline_last_stage,
+)
 from flagscale.train.models.llava_onevision.dataloader_provider import (
     train_valid_test_dataloaders_provider,
+    is_first_or_last_stage,
 )
 from flagscale.train.train import pretrain
 
@@ -127,6 +133,14 @@ def model_provider(
                 args.encoder_tensor_model_parallel_size
             )
 
+    # Make sure vision model pipeline parallel size is not inherited from the language model pipeline parallel size.
+    # 0 is not a valid for the config value, hence max(1, ).
+    vision_config.pipeline_model_parallel_size = max(1, args.encoder_pipeline_model_parallel_size)
+    vision_projection_config.pipeline_model_parallel_size = vision_config.pipeline_model_parallel_size
+
+    # Make sure the vision model does not inherit first and last pipeline num layers from the language model.
+    vision_config.first_pipeline_num_layers = vision_config.last_pipeline_num_layers = None
+
     vision_projection_layer_spec = get_mlp_module_spec(use_te=use_te).submodules
 
     model = LLaVAOneVisionModel(
@@ -173,6 +187,10 @@ def get_batch(data_iterator):
     """Generate a batch"""
 
     args = get_args()
+    # Dataloader doesn't run on the middle stages in a pipeline parallel model.
+    pp_size = get_pipeline_model_parallel_world_size()
+    if not is_first_or_last_stage(pp_size, args.encoder_pipeline_model_parallel_size):
+        return None, None, None, None, None, None
 
     # Broadcast data.
     torch.cuda.nvtx.range_push("get_data")

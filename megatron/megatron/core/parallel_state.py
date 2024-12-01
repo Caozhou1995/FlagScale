@@ -1433,6 +1433,7 @@ def is_pipeline_first_stage(ignore_virtual=False, group=None):
             and get_virtual_pipeline_model_parallel_rank() != 0
         ):
             return False
+
     return get_pipeline_model_parallel_rank() == 0
 
 
@@ -1452,6 +1453,7 @@ def is_pipeline_last_stage(ignore_virtual=False, group=None):
             != (virtual_pipeline_model_parallel_world_size - 1)
         ):
             return False
+    # print("is_pipeline_last_stage: ", get_pipeline_model_parallel_rank() == (get_pipeline_model_parallel_world_size() - 1))
     return get_pipeline_model_parallel_rank() == (get_pipeline_model_parallel_world_size() - 1)
 
 
@@ -1463,12 +1465,16 @@ def is_rank_in_embedding_group(ignore_virtual=False, group=None):
 
     rank = torch.distributed.get_rank()
     global _EMBEDDING_GLOBAL_RANKS
+    global _PIPELINE_MODEL_PARALLEL_DECODER_START
+    # print("_EMBEDDING_GLOBAL_RANKS: ", _EMBEDDING_GLOBAL_RANKS)
     if _EMBEDDING_GLOBAL_RANKS is None:
         return False
     if ignore_virtual:
         return rank in _EMBEDDING_GLOBAL_RANKS
     if rank in _EMBEDDING_GLOBAL_RANKS:
         if rank == _EMBEDDING_GLOBAL_RANKS[0]:
+            if _PIPELINE_MODEL_PARALLEL_DECODER_START is not None:
+                return get_pipeline_model_parallel_rank() == 0 or get_pipeline_model_parallel_rank() == _PIPELINE_MODEL_PARALLEL_DECODER_START
             return is_pipeline_first_stage(ignore_virtual=False)
         elif rank == _EMBEDDING_GLOBAL_RANKS[-1]:
             return is_pipeline_last_stage(ignore_virtual=False)
