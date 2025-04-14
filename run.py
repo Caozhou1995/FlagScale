@@ -1,3 +1,5 @@
+import os
+import sys
 import hydra
 from omegaconf import DictConfig
 
@@ -7,6 +9,20 @@ from flagscale.runner.runner_inference import SSHInferenceRunner
 from flagscale.runner.runner_serve import SSHServeRunner
 from flagscale.runner.runner_train import CloudTrainRunner, SSHTrainRunner
 from flagscale.runner.utils import is_master
+
+
+# Compatible with both command-line execution and source code execution.
+try:
+    import flag_scale
+except Exception as e:
+    try:
+        sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
+        import FlagScale
+        print("FlagScale imported successfully.")
+    except Exception as e:
+        print("Failed to import FlagScale. Please check your environment.")
+        raise e
+
 
 # To accommodate the scenario where the before_start field is used to switch to the actual environment during program execution,
 # we have placed the import statements inside the function body rather than at the beginning of the file.

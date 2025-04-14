@@ -27,7 +27,7 @@ def init_submodule(dst, submodule_name):
     if os.path.exists(dst) and len(os.listdir(dst)) > 0:
         print(f"Skipping {submodule_name} initialization, as it already exists.")
         return
-    repo = Repo(os.path.dirname(__file__))
+    repo = Repo(os.path.dirname(os.path.dirname(__file__)))
     repo.submodule_update(init=True, recursive=True)
     print(f"Initialized {submodule_name} submodule.")
 
