@@ -1,6 +1,7 @@
 import os
 import sys
 import shutil
+from git.repo import Repo
 
 
 def create_symlinks(src_dir, dst_dir):
@@ -21,8 +22,24 @@ def create_symlinks(src_dir, dst_dir):
 
             print(f"Created symbolic link: {filename} -> {rel_path}")
 
+
+def init_submodule(dst, submodule_name):
+    if os.path.exists(dst) and len(os.listdir(dst)) > 0:
+        print(f"Skipping {submodule_name} initialization, as it already exists.")
+        return
+    repo = Repo(os.path.dirname(__file__))
+    repo.submodule_update(init=True, recursive=True)
+    print(f"Initialized {submodule_name} submodule.")
+
+
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.realpath(__file__))
-    patch_src = os.path.join(script_dir, "train", "Megatron-LM")
-    megatron_lm_dst = os.path.join(script_dir, "..", "third_party", "Megatron-LM")
-    create_symlinks(patch_src, megatron_lm_dst)
+    # Megatron-LM
+    src = os.path.join(script_dir, "train", "Megatron-LM")
+    dst = os.path.join(script_dir, "..", "third_party", "Megatron-LM")
+    create_symlinks(src, dst)
+
+    # # vllm will be supported in the future.abs
+    # src = os.path.join(script_dir, "train", "vllm")
+    # dst = os.path.join(script_dir, "..", "third_party", "vllm")
+    # create_symlinks(src, dst)
