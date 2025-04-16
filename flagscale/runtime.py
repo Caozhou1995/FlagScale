@@ -264,7 +264,8 @@ def sync(file_path, status, src, dst, f=None):
 
 
 def create_file_and_symlink(source_file, target_file):
-    assert not os.path.lexists(source_file)
+    if os.path.lexists(source_file):
+        print(f"The file {source_file} will be covered by {target_file}.")
     assert os.path.lexists(target_file)
 
     source_dir = os.path.dirname(source_file)
