@@ -11,7 +11,7 @@ def unpatch(src, dst, submodule_name):
     init_submodule(dst, submodule_name)
     create_symlinks(src, dst)
     deleted_files_path = os.path.join(src, DELETED_FILE_NAME)
-    if os.path.exists(deleted_files_path):
+    if os.path.lexists(deleted_files_path):
         delete_file(deleted_files_path, dst)
 
 
@@ -21,7 +21,7 @@ def delete_file(file_path, dst):
         for deleted_file in deleted_files:
             deleted_file = deleted_file.strip()
             deleted_file_path = os.path.join(dst, deleted_file)
-            if os.path.exists(deleted_file_path):
+            if os.path.lexists(deleted_file_path):
                 os.remove(deleted_file_path)
                 print(f"Deleted file: {deleted_file_path}")
             else:
@@ -39,20 +39,20 @@ def create_symlinks(src, dst):
             dst_file = os.path.join(dst, rel_path)
 
             dst_file_dir = os.path.dirname(dst_file)
-            if not os.path.exists(dst_file_dir):
+            if not os.path.lexists(dst_file_dir):
                 os.makedirs(dst_file_dir)
 
-            if os.path.exists(dst_file):
+            if os.path.lexists(dst_file):
                 os.remove(dst_file)
-            assert not os.path.exists(dst_file)
+            assert not os.path.lexists(dst_file)
             os.symlink(src_file, dst_file)
 
             print(f"Created symbolic link: {dst_file} -> {src_file}")
 
 
 def init_submodule(dst, submodule_name):
-    if os.path.exists(dst) and len(os.listdir(dst)) > 0:
-        print(f"Skipping {submodule_name} initialization, as it already exists.")
+    if os.path.lexists(dst) and len(os.listdir(dst)) > 0:
+        print(f"Skipping {submodule_name} initialization, as it already lexists.")
         return
     print(f"Initializing submodule {submodule_name}...")
     repo = Repo(os.path.dirname(os.path.dirname(__file__)))
@@ -178,13 +178,13 @@ def patch(main_path, submodule_name, src, dst):
             tmp_file.close()
 
             shutil.move(tmp_file.name, deleted_log)
-            if os.path.exists(tmp_file.name):
+            if os.path.lexists(tmp_file.name):
                 os.remove(tmp_file.name)
 
         except Exception as e:
             print(f"Error occurred while processing deleted files: {e}")
             tmp_file.close()
-            if os.path.exists(tmp_file.name):
+            if os.path.lexists(tmp_file.name):
                 os.remove(tmp_file.name)
             raise
         
@@ -202,7 +202,7 @@ def sync(file_path, status, src, dst, f=None):
     if change_type == 'T':
         is_symlink = os.path.islink(dst_file_path)
         if is_symlink:
-            if not os.path.exists(src_file_path):
+            if not os.path.lexists(src_file_path):
                 raise ValueError(f"{symbolic_error}: {dst_file_path}")
         else:
             raise ValueError(f"{typechange_error}: {dst_file_path}")
@@ -210,13 +210,13 @@ def sync(file_path, status, src, dst, f=None):
     elif change_type in ['A', 'UT']:
         is_symlink = os.path.islink(dst_file_path)
         if is_symlink:
-            if not os.path.exists(src_file_path):
+            if not os.path.lexists(src_file_path):
                 real_path = os.readlink(dst_file_path)
-                if os.path.exists(real_path):
+                if os.path.lexists(real_path):
                     os.makedirs(os.path.dirname(src_file_path), exist_ok=True)
                     shutil.move(real_path, src_file_path)
                     print(f"Move {real_path} to {src_file_path} and create symbolic link {dst_file_path} -> {src_file_path}")
-                    if os.path.exists(dst_file_path):
+                    if os.path.lexists(dst_file_path):
                         os.remove(dst_file_path)
                     os.symlink(src_file_path, dst_file_path)
                 else:
@@ -225,7 +225,7 @@ def sync(file_path, status, src, dst, f=None):
             create_file_and_symlink(src_file_path, dst_file_path)
 
     elif change_type == 'D':
-        if os.path.exists(src_file_path):
+        if os.path.lexists(src_file_path):
             os.remove(src_file_path)
             print(f"The file {src_file_path} has been deleted.")
         else:
@@ -237,7 +237,7 @@ def sync(file_path, status, src, dst, f=None):
         is_symlink = os.path.islink(dst_file_path)
         if is_symlink:
             raise ValueError("Modified symbolic links in the submodule is not supported except for those defined in FlagScale")
-        if not os.path.exists(src_file_path):
+        if not os.path.lexists(src_file_path):
             create_file_and_symlink(src_file_path, dst_file_path)
 
     elif change_type == 'R':
@@ -252,11 +252,11 @@ def sync(file_path, status, src, dst, f=None):
             if real_path != renamed_src_file_path:
                 shutil.move(real_path, renamed_src_file_path)
                 print(f"Move {real_path} to {renamed_src_file_path} and create symbolic link {renamed_dst_file_path} -> {renamed_src_file_path}")
-            if os.path.exists(renamed_dst_file_path):
+            if os.path.lexists(renamed_dst_file_path):
                 os.remove(renamed_dst_file_path)
             os.symlink(renamed_src_file_path, renamed_dst_file_path)
         else:
-            assert not os.path.exists(renamed_src_file_path)
+            assert not os.path.lexists(renamed_src_file_path)
             create_file_and_symlink(renamed_src_file_path, renamed_dst_file_path)
             assert f
             f.write(f"{file_path}\n")
@@ -264,15 +264,15 @@ def sync(file_path, status, src, dst, f=None):
 
 
 def create_file_and_symlink(source_file, target_file):
-    assert not os.path.exists(source_file)
-    assert os.path.exists(target_file)
+    assert not os.path.lexists(source_file)
+    assert os.path.lexists(target_file)
 
     source_dir = os.path.dirname(source_file)
-    if not os.path.exists(source_dir):
+    if not os.path.lexists(source_dir):
         os.makedirs(source_dir, exist_ok=True)
 
     shutil.copyfile(target_file, source_file)
-    if os.path.exists(target_file):
+    if os.path.lexists(target_file):
         os.remove(target_file)
     os.symlink(source_file, target_file)
     print(f"The file {target_file} has been copied to {source_file} and Create symbolic link {target_file} -> {source_file}.")
