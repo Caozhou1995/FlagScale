@@ -1,0 +1,13 @@
+diff --git a/setup.py b/setup.py
+index 2c1e0a41..03acd2d3 100644
+--- a/setup.py
++++ b/setup.py
+@@ -4,7 +4,7 @@ import sys
+ 
+ from setuptools import find_packages, setup
+ from setuptools.command.install import install
+-
++"CZ"
+ try:
+     import git  # from GitPython
+ except ImportError:
